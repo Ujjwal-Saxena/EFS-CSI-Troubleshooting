@@ -1,0 +1,78 @@
+Many times, we came across situations, when after installing EFS-CSI-Controller, we start facing issues wherein their application pods gets stuck at 'Init" state after getting deployed in EKS cluster. Kindly refer to below troubleshooting steps to investigate and fix this issue.
+
+TROUBLESHOOTING
+
+Check the status of "efs-csi-controller" pods:
+```
+$ kubectl get po -A | grep -i efs-csi-controller
+```
+
+Then, check the pods stuck at “Init” state and described them :
+```
+$ kubectl describe <app-pod> -n <namespace>
+
+EVENT:
+  Type     Reason       Age   From               Message
+  ----     ------       ----  ----               -------
+  Normal   Scheduled    25m   default-scheduler  Successfully assigned ccb-batch-prod/hvfwls-erpasm-ivr-XXXz to ip-10-213-26-175.eu-central-1.compute.internal
+  Warning  FailedMount  24m   kubelet            MountVolume.SetUp failed for volume "ccb-bXXXfer" : rpc error: code = Internal desc = Could not mount "fs-095eXXXX5d4f:/" at "/var/lib/kubelet/pods/f3d0XXXX2-c6a879bc7729/volumes/kubernetes.io~csi/ccbXXXfer/mount": mount failed: exit status 1
+Mounting command: mount
+Mounting arguments: -t efs -o accesspoint=fsap-0dXXX2f5bff5d4f:/ /var/lib/kubelet/pods/f3d0bXXXc7729/volumes/kubernetes.io~csi/ccb-batXXXfer/mount
+Output: Failed to locate an available port in the range [20049, 20449], try specifying a different port range in /etc/amazon/efs/efs-utils.conf
+  Warning  FailedMount  85s (x11 over 24m)  kubelet  MountVolume.SetUp failed for volume "ccb-Xating" : rpc eXXrror: code = Internal desc = Could not mount "fs-00XXd8:/" at "/var/lib/kubelet/pods/f3XXX2-c6a879bc7729/volumes/kubernetes.io~csi/ccb-batch-efs-pv-rating/mount": mount failed: exit status 1
+Mounting command: mount
+Mounting arguments: -t efs -o accesspoint=fsap-xxxd8d74afbd8:/ /var/lib/kubelet/pods/f3d0XXXf02-c6a879bc7729/volumes/kubernetes.io~csi/ccb-XXing/mount
+Output: Failed to locate an available port in the range [20049, 20449], try specifying a different port range in /etc/amazon/efs/efs-utils.conf
+Confirm if the traffic between EFS and worker node security group is allowed and ACLs are correctly configured.
+```
+
+Ensure that you have latest version of EFS-CSI-Controller deployed.
+
+In case, if issue still persists, restart EFS-CSI-Controller and the application pods to see latest status:
+```
+$ kubectl rollout restart deploy efs-csi-controller -n kube-system
+$ kubectl rollout restart deploy <application-deploy> -n <namespace>
+```
+
+Then check latest logs of EFS-CSI-Controller pods :
+```
+$ kubectl logs -f efs-csi-controller -n kube-system -c csi-provisioner
+```
+
+CAUSE OF ISSUE
+
+This issue occurs in case the EFS-CSI-Controller version deployed is old and deprecated.
+
+This issue occurs as a result of stunnel process on ports 20049-21049. There are already existing Github Issues in [1][2], that says stunnel is using ports 20049 - 21049. The default range (20049, 20449) allows 400 ports to be used by the stunnel process, which creates a TLS connection with EFS for pods that mounts, an EFS volume to be able to communicate securely over it's dedicated tunnel to EFS.
+
+When a pod is deleted, stunnel is not closed, then if the pods (with EFS volume mount) are recreated enough times on the same node, this issue can occur. Please also note that stunnel isn't closed right away after umount. By default, efs-utils requires 30s grace period to close Stunnel. [3]
+
+To debug this issue further, we went ahead and SSH into worker node to check the current number of stunnel processes on the instance.
+```
+> sudo netstat -lp | grep stunnel | wc -l
+400
+```
+
+Kindly allow me to mention that whenever the value of above command is 400, it means that current number of stunnel processes is 400. You will see the error if you mount additional pod volume.
+
+One of the common cause of this error is if the stunnel process never releases ports that it does not use any more, until there are no more available ports in the default range (20049,20449), to assign to pods that are being newly created, hence one would see their pods stuck in container creating state and failing to mount the EFS volume with this error.
+
+Other possible causes of this error is when you have nodes running old AMIs or drivers, the issue may still occur.
+
+RECOMMENDATIONS
+
+In order to fix this issue, ensure below steps are followed:
+STEP -1. Upgrade the version of the EFS CSI Driver to latest one please refer to document [2].
+
+STEP - 2. Recycle/Drain the current worker node for a new one, and then confirm the port usage by the stunnel process using the command :
+```
+$ sudo netstat -lp | grep stunnel | wc -l
+```
+
+REFERENCES
+
+[1] https://github.com/kubernetes-sigs/aws-efs-csi-driver/issues/281
+
+[2] https://github.com/kubernetes-sigs/aws-efs-csi-driver/releases?page=6
+
+[3] https://github.com/aws/efs-utils/issues/35#issuecomment-561426784
